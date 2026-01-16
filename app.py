@@ -26,7 +26,7 @@ st.markdown("""
 
 st.title("📍 GPS Enricher")
 
-# --- 2. USER GUIDE (FULL RICHNESS RESTORED) ---
+# --- 2. USER GUIDE ---
 with st.expander("📘 **User Guide: Logic & Legend**"):
     st.markdown("""
     ### **1. Scanning Logic**
@@ -195,8 +195,14 @@ if uploaded_file:
                 w.description, w.symbol, w.type = p['desc'], p['symbol'], p['cat']
                 g_out.waypoints.append(w)
             
+            # Use an empty dataframe with correct columns if no POIs found
+            if not final_pois:
+                df = pd.DataFrame(columns=["km", "cat", "name", "lat", "lon", "desc", "hours", "phone", "symbol", "color"])
+            else:
+                df = pd.DataFrame(final_pois)
+
             st.session_state.results = {
-                "df": pd.DataFrame(final_pois), "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
+                "df": df, "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
                 "path": [[p.longitude, p.latitude] for p in raw_pts[::30]],
                 "slat": raw_pts[0].latitude, "slon": raw_pts[0].longitude, "fname": f"{uploaded_file.name.split('.')[0]}_enriched.gpx"
             }
@@ -209,15 +215,19 @@ if uploaded_file:
     if st.session_state.status == 'complete' and st.session_state.results:
         res = st.session_state.results
         st.subheader("📊 Results")
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            # Universal column renaming to avoid KeyErrors
-            counts = res['df']['cat'].value_counts().reset_index()
-            counts.columns = ['Category', 'Count']
-            st.dataframe(counts, hide_index=True)
-        with c2:
-            map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"**{p['name']}**\n{p['desc']}"} for p in res['pois']]
-            st.pydeck_chart(pdk.Deck(initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=10), layers=[pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2), pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)], tooltip={"text": "{info}"}))
+        
+        if res['df'].empty:
+            st.warning("No amenities found within 50m of your track. Try selecting more categories or check if the area is mapped on OSM.")
+        else:
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                # Robust index reset and renaming
+                counts = res['df']['cat'].value_counts().reset_index()
+                counts.columns = ['Category', 'Count']
+                st.dataframe(counts, hide_index=True)
+            with c2:
+                map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"**{p['name']}**\n{p['desc']}"} for p in res['pois']]
+                st.pydeck_chart(pdk.Deck(initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=10), layers=[pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2), pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)], tooltip={"text": "{info}"}))
         
         dl1, dl2 = st.columns(2)
         dl1.download_button("⬇️ Download GPX", res['gpx_bytes'], res['fname'], "application/gpx+xml", type="primary")
