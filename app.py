@@ -8,7 +8,7 @@ from math import radians, cos, sin, asin, sqrt
 from io import BytesIO
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="TCR Tool V12 (Simple)", page_icon="🚴", layout="centered")
+st.set_page_config(page_title="GPS Waypoints Enricher", page_icon="📍", layout="centered")
 
 if 'running' not in st.session_state:
     st.session_state.running = False
@@ -16,12 +16,12 @@ if 'running' not in st.session_state:
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 5px; height: 3em; font-weight: bold; }
-    div[data-testid="stExpander"] { display: none; } /* Hide expanders if any exist */
+    div[data-testid="stExpander"] { display: none; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🚴 TCR Survival: Selector")
-st.markdown("Select what you need. The tool finds roadside stops (50m range) automatically.")
+st.title("📍 GPS Waypoints Enricher")
+st.markdown("Upload a GPX track. This tool scans the route (Roadside 50m) and automatically adds useful amenities like water, food, and fuel.")
 
 # --- 1. UPLOAD ---
 uploaded_file = st.file_uploader("📂 Drop GPX file", type=['gpx'], disabled=st.session_state.running)
@@ -29,10 +29,9 @@ uploaded_file = st.file_uploader("📂 Drop GPX file", type=['gpx'], disabled=st
 # --- 2. SELECT CATEGORIES ---
 st.subheader("🛠️ Select Amenities")
 
-# Hardcoded Logic (Hidden from User)
+# Hardcoded Logic
 RADIUS = 50        # Strict Roadside
 SAMPLE_STEP = 100  # High Precision
-MIN_GAP_KM = 0     # Show EVERYTHING (No De-clutter)
 
 amenity_config = {
     "Water": {
@@ -54,10 +53,9 @@ amenity_config = {
     "Bike": {"label": "🔧 Bike Shops", "query": """node["shop"~"bicycle"](around:{radius},{coords})""", "icon": "Bike Shop", "color": [255, 0, 0]},
     "Pharm": {"label": "💊 Pharmacies", "query": """node["amenity"~"pharmacy"](around:{radius},{coords})""", "icon": "First Aid", "color": [255, 0, 0]},
     "ATM": {"label": "🏧 ATMs (Cash)", "query": """node["amenity"~"atm"](around:{radius},{coords})""", "icon": "Generic", "color": [0, 100, 0]},
-    "Train": {"label": "🚆 Train Stations (Bailout)", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
+    "Train": {"label": "🚆 Train Stations", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
 }
 
-# Display in 3 Columns
 cols = st.columns(3)
 selected_keys = []
 defaults = ["Water", "Toilets", "Shops", "Fuel"]
@@ -70,7 +68,7 @@ for i, (key, cfg) in enumerate(amenity_config.items()):
 # --- ENGINE ---
 BATCH_SIZE = 25
 WORKERS = 4
-HEADERS = {"User-Agent": "TCR-Tool/12.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/1.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -107,8 +105,8 @@ def fetch_batch(args):
 col_start, col_stop = st.columns([3, 1])
 with col_start:
     if uploaded_file and not st.session_state.running:
-        if st.button("🚀 Start Scan", type="primary"):
-            if not selected_keys: st.error("Select amenities first.")
+        if st.button("🚀 Start Enrichment", type="primary"):
+            if not selected_keys: st.error("Select at least one amenity.")
             else:
                 st.session_state.running = True
                 st.rerun()
@@ -120,6 +118,7 @@ with col_stop:
             st.rerun()
 
 if st.session_state.running:
+    # We use st.status container which looks clean
     status = st.status("Initializing...", expanded=True)
     try:
         gpx = gpxpy.parse(uploaded_file)
@@ -141,43 +140,49 @@ if st.session_state.running:
         
         found_raw = []
         seen_ids = set()
+        
+        # Add Progress Bar inside the status container
         prog = status.progress(0)
         start_time = time.time()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as exc:
             futures = {exc.submit(fetch_batch, (b, selected_keys)): i for i, b in enumerate(batches)}
+            
             for i, f in enumerate(concurrent.futures.as_completed(futures)):
                 completed = i + 1
                 percent = completed / total_batches
                 prog.progress(percent)
                 
-                # Timer
+                # Timer Calculation
                 elapsed = time.time() - start_time
                 if completed > 0:
-                    est_seconds = int((elapsed / completed) * (total_batches - completed))
+                    avg_time = elapsed / completed
+                    remaining_batches = total_batches - completed
+                    est_seconds = int(avg_time * remaining_batches)
                     mins, secs = divmod(est_seconds, 60)
-                    status.write(f"Scanning... {int(percent*100)}% (Est. {mins}m {secs}s remaining)")
+                    
+                    # Update label with Time Remaining
+                    status.update(label=f"Scanning... {int(percent*100)}% (Est. {mins}m {secs}s remaining)")
                 
                 for item in f.result():
                     if item['id'] not in seen_ids:
                         seen_ids.add(item['id'])
                         found_raw.append(item)
         
-        # Final Processing
-        status.write("Processing results...")
+        # Processing
+        status.write("Categorizing results...")
         final_pois = []
         
-        # Simple Cat Matcher
         def get_cat(item):
             tags = item.get('tags', {})
-            # Prioritize specific checks
+            # Special logic for Water
             if "Water" in selected_keys:
                 if tags.get("amenity") == "grave_yard": return "Water"
                 if tags.get("amenity") in ["drinking_water", "fountain", "watering_place"]: return "Water"
                 if tags.get("natural") == "spring": return "Water"
                 if tags.get("man_made") in ["water_tap", "water_well"]: return "Water"
             
-            # Check others
+            # Others
             for k in selected_keys:
                 if k == "Water": continue
                 q = amenity_config[k]["query"]
@@ -207,12 +212,12 @@ if st.session_state.running:
                     "symbol": amenity_config[cat]["icon"]
                 })
         
-        status.update(label=f"Done! Found {len(final_pois)} items.", state="complete")
+        status.update(label=f"Done! Found {len(final_pois)} POIs.", state="complete")
         
-        # Preview Map
+        # Map
         st.subheader("📍 Preview")
         map_data = [{"coordinates": [p['lon'], p['lat']], "color": amenity_config[p['cat']]['color'], "name": p['name']} for p in final_pois]
-        path_data = [[p.longitude, p.latitude] for p in all_pts[::30]] # Downsample for map speed
+        path_data = [[p.longitude, p.latitude] for p in all_pts[::30]]
         
         st.pydeck_chart(pdk.Deck(
             initial_view_state=pdk.ViewState(latitude=all_pts[0].latitude, longitude=all_pts[0].longitude, zoom=8),
@@ -234,10 +239,10 @@ if st.session_state.running:
         out.write(gpx.to_xml().encode('utf-8'))
         out.seek(0)
         
-        st.success(f"Added {len(final_pois)} POIs.")
-        st.download_button("⬇️ Download GPX", out, "TCR_Enhanced.gpx", "application/gpx+xml", type="primary")
+        st.success(f"Enrichment Complete. Added {len(final_pois)} waypoints.")
+        st.download_button("⬇️ Download GPX", out, "Enriched_Route.gpx", "application/gpx+xml", type="primary")
         
-        if st.button("🔄 Upload Another File"):
+        if st.button("🔄 Start New File"):
             st.session_state.running = False
             st.rerun()
 
