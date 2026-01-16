@@ -13,7 +13,7 @@ st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered
 
 # --- SESSION STATE INITIALIZATION ---
 if 'status' not in st.session_state:
-    st.session_state.status = 'idle'  # idle, running, complete
+    st.session_state.status = 'idle'
 if 'results' not in st.session_state:
     st.session_state.results = None
 
@@ -43,13 +43,11 @@ with st.expander("📘 **User Guide: Logic & Legend**"):
     """)
 
 # --- 2. UPLOAD ---
-# Disable upload if we are currently running
 is_disabled = st.session_state.status == 'running'
 uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", type=['gpx'], disabled=is_disabled)
 
-# --- 3. SETTINGS & ENGINE ---
+# --- 3. SETTINGS ---
 if uploaded_file:
-    # --- CONFIGURATION UI ---
     st.subheader("⚙️ Configuration")
     
     MIN_GAP_KM = st.slider(
@@ -102,7 +100,7 @@ if uploaded_file:
                 st.session_state.status = 'idle'
                 st.rerun()
 
-    # --- HELPER FUNCTIONS ---
+    # --- ENGINE HELPER FUNCTIONS ---
     def haversine(lon1, lat1, lon2, lat2):
         lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
         dlon, dlat = lon2 - lon1, lat2 - lat1
@@ -137,6 +135,25 @@ if uploaded_file:
             except: continue
         return []
 
+    def identify_cat(item, selected_keys):
+        tags = item.get('tags', {})
+        if "Cemetery" in selected_keys and tags.get("amenity") == "grave_yard": return "Cemetery"
+        if "Water" in selected_keys:
+            if tags.get("amenity") in ["drinking_water", "fountain", "watering_place"] or tags.get("natural") == "spring" or tags.get("man_made") in ["water_tap", "water_well"]: return "Water"
+        for k in selected_keys:
+            if k in ["Water", "Cemetery"]: continue
+            q = amenity_config[k]["query"]
+            if "toilets" in q and tags.get("amenity") == "toilets": return k
+            if "shop" in q and "shop" in tags: return k
+            if "fuel" in q and tags.get("amenity") == "fuel": return k
+            if "restaurant" in q and tags.get("amenity") in ["restaurant","fast_food","cafe"]: return k
+            if "tourism" in q and "tourism" in tags: return k
+            if "pharmacy" in q and tags.get("amenity") == "pharmacy": return k
+            if "bicycle" in q and "shop" in tags: return k
+            if "atm" in q and tags.get("amenity") == "atm": return k
+            if "railway" in q and tags.get("railway") in ["station","halt"]: return k
+        return None
+
     # --- CORE PROCESSING ---
     if st.session_state.status == 'running':
         status = st.status("Initializing Scan...", expanded=True)
@@ -161,51 +178,52 @@ if uploaded_file:
                         if item['id'] not in seen:
                             seen.add(item['id']); found_raw.append(item)
             
-            # Enrich & Filter
             final_pois, locs = [], {k: [] for k in selected_keys}
             min_deg = MIN_GAP_KM / 111.0
 
             for item in found_raw:
-                tags = item.get('tags', {})
-                cat = next((k for k,v in amenity_config.items() if k in selected_keys and (tags.get("amenity") in v['query'] or tags.get("shop") in v['query'] or tags.get("tourism") in v['query'] or tags.get("railway") in v['query'])), None)
+                cat = identify_cat(item, selected_keys)
                 if not cat: continue
-                
                 lat, lon = item['lat'], item['lon']
                 if any(sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg for (alat, alon) in locs[cat]): continue
 
-                name = tags.get('name') or tags.get('brand') or tags.get('operator') or cat
-                details = [f"🕒 {tags.get('opening_hours')}" if tags.get('opening_hours') else None, f"📞 {tags.get('phone')}" if tags.get('phone') else None]
-                desc_str = f"{cat} | " + " | ".join(filter(None, details))
+                tags = item.get('tags', {})
+                name = tags.get('name') or tags.get('brand') or tags.get('operator') or ( "Cemetery (Check Tap)" if cat == "Cemetery" else cat )
+                
+                details = []
+                if tags.get('opening_hours'): details.append(f"🕒 {tags.get('opening_hours')}")
+                if tags.get('phone'): details.append(f"📞 {tags.get('phone')}")
+                if tags.get('fee') == 'yes': details.append("💵 Paid")
+                if tags.get('drinking_water') == 'yes': details.append("🚰 Potable")
+                
+                desc_str = f"{cat}" + (" | " + " | ".join(details) if details else "")
                 km_mark = get_nearest_km(lat, lon, track_data)
 
                 final_pois.append({
                     "km": km_mark, "cat": cat, "name": name, "lat": lat, "lon": lon, "desc": desc_str,
                     "hours": tags.get('opening_hours', ""), "phone": tags.get('phone', ""), "city": tags.get('addr:city', ""),
                     "symbol": amenity_config[cat]["icon"], "color": amenity_config[cat]["color"],
-                    "gmap": f"https://www.google.com/maps?q={lat},{lon}"
+                    "gmap": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
                 })
                 locs[cat].append((lat, lon))
 
             final_pois.sort(key=lambda x: x['km'])
             
-            # Save Results to State
-            df = pd.DataFrame(final_pois)
-            
-            # Create Enriched GPX Waypoints
+            # Build Result GPX
+            gpx_out = gpxpy.gpx.GPX()
+            # Preserve original tracks
+            for track in gpx.tracks: gpx_out.tracks.append(track)
             for p in final_pois:
                 wpt = gpxpy.gpx.GPXWaypoint(latitude=p['lat'], longitude=p['lon'], name=p['name'])
                 wpt.description, wpt.symbol, wpt.type = p['desc'], p['symbol'], p['cat']
-                gpx.waypoints.append(wpt)
+                gpx_out.waypoints.append(wpt)
             
-            # Export to Memory
-            out_gpx = BytesIO()
-            out_gpx.write(gpx.to_xml().encode('utf-8'))
-            
+            df = pd.DataFrame(final_pois)
             csv_df = df[['km', 'cat', 'name', 'hours', 'phone', 'city', 'lat', 'lon', 'gmap']].copy()
             csv_df.columns = ['KM', 'Type', 'Name', 'Hours', 'Phone', 'City', 'Lat', 'Lon', 'Map Link']
-            
+
             st.session_state.results = {
-                "df": df, "pois": final_pois, "gpx_bytes": out_gpx.getvalue(),
+                "df": df, "pois": final_pois, "gpx_bytes": gpx_out.to_xml().encode('utf-8'),
                 "csv_bytes": csv_df.to_csv(index=False).encode('utf-8'),
                 "filename": f"{uploaded_file.name.split('.')[0]}_enriched.gpx",
                 "path": [[p.longitude, p.latitude] for p in raw_pts[::30]],
@@ -227,12 +245,12 @@ if uploaded_file:
         with c1:
             st.dataframe(res['df']['cat'].value_counts().reset_index().rename(columns={'count':'Count','cat':'Category'}), hide_index=True)
         with c2:
-            map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"{p['name']} (Km {p['km']:.1f})"} for p in res['pois']]
+            map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"{p['name']} (Km {p['km']:.1f})\n{p['desc']}"} for p in res['pois']]
             st.pydeck_chart(pdk.Deck(
-                initial_view_state=pdk.ViewState(latitude=res['start_lat'], longitude=res['start_lon'], zoom=8),
+                initial_view_state=pdk.ViewState(latitude=res['start_lat'], longitude=res['start_lon'], zoom=10),
                 layers=[
                     pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2),
-                    pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=300, pickable=True)
+                    pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)
                 ], tooltip={"text": "{info}"}
             ))
         
@@ -240,7 +258,7 @@ if uploaded_file:
         with col_dl_gpx:
             st.download_button("⬇️ Download Enriched GPX", res['gpx_bytes'], res['filename'], "application/gpx+xml", type="primary")
         with col_dl_csv:
-            st.download_button("⬇️ Download CSV Table", res['csv_bytes'], "Cuesheet.csv", "text/csv")
+            st.download_button("⬇️ Download CSV Cuesheet", res['csv_bytes'], "Cuesheet.csv", "text/csv")
 
         if st.button("🔄 Start New File"):
             st.session_state.status = 'idle'
