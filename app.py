@@ -13,7 +13,7 @@ st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered
 
 # --- 1. STATE MANAGEMENT ---
 if 'status' not in st.session_state:
-    st.session_state.status = 'idle'  # idle, running, complete
+    st.session_state.status = 'idle'
 if 'results' not in st.session_state:
     st.session_state.results = None
 
@@ -26,20 +26,34 @@ st.markdown("""
 
 st.title("📍 GPS Enricher")
 
-# --- 2. USER GUIDE ---
+# --- 2. USER GUIDE (FULL RICHNESS RESTORED) ---
 with st.expander("📘 **User Guide: Logic & Legend**"):
     st.markdown("""
     ### **1. Scanning Logic**
-    * **Range:** Scans a **50m radius** along your track for zero-detour stops.
-    * **Coverage:** Samples every **100m** for full coverage.
-    * **De-Cluttering:** Applies a **Min Gap** filter to prevent icon stacking in towns.
+    * **Range:** The tool scans a **50m radius** along your track to ensure zero-detour stops.
+    * **Coverage:** It samples every **100m** to guarantee full coverage.
+    * **De-Cluttering:** It applies a "minimum gap" filter (default 2km) to prevent icon stacking in towns.
 
     ### **2. Data Extraction**
+    We extract deep details from OpenStreetMap:
     * **Identity:** Brand names ("Shell", "Coop") instead of generic labels.
     * **Logistics:** **Opening Hours** and **Phone Numbers**.
     * **Attributes:** Water drinkability, Toilet fees, etc.
 
-    ### **3. Support**
+    ### **3. Searchable Amenities**
+    * **💧 Water:** Drinking fountains, springs, taps, and **Cemeteries** (marked with Water icon).
+    * **🛒 Shops:** Supermarkets, convenience stores, bakeries.
+    * **⛽ Fuel:** 24/7 stations (often with food/water).
+    * **🍔 Food:** Restaurants, fast food, cafes.
+    * **🚽 Toilets:** Public restrooms.
+    * **🛏️ Sleep:** Hotels, hostels, guest houses.
+    * **⛺ Camping:** Official campsites.
+    * **💊 Pharmacy:** Medical supplies.
+    * **🔧 Bike Shop:** Repairs and parts.
+    * **🏧 ATM:** Cash machines.
+    * **🚆 Train:** Stations (for emergency bail-out).
+
+    ### **4. Support**
     For issues or feature requests: **jonas@verest.ch**
     """)
 
@@ -50,7 +64,6 @@ uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", typ
 # --- 4. CONFIGURATION ---
 if uploaded_file:
     st.subheader("⚙️ Configuration")
-    
     MIN_GAP_KM = st.slider("🧹 **Map Density (Min Gap)**", 0.0, 10.0, 2.0, 0.5, format="%.1f km", disabled=is_disabled)
 
     amenity_config = {
@@ -87,7 +100,7 @@ if uploaded_file:
         st.session_state.status = 'idle'
         st.rerun()
 
-    # --- 5. ENGINE FUNCTIONS ---
+    # --- 5. HELPERS ---
     def haversine(lon1, lat1, lon2, lat2):
         lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
         dlon, dlat = lon2 - lon1, lat2 - lat1
@@ -121,14 +134,13 @@ if uploaded_file:
             except: continue
         return []
 
-    # --- 6. CORE SCANNING ---
+    # --- 6. ENGINE ---
     if st.session_state.status == 'running':
         status_bar = st.status("Scanning track...", expanded=True)
         try:
             gpx = gpxpy.parse(uploaded_file)
             raw_pts = [p for t in gpx.tracks for s in t.segments for p in s.points]
             track_dist_data = calculate_track_distance(raw_pts)
-            
             scan_pts, last = [], None
             for p in raw_pts:
                 if not last or haversine(last.longitude, last.latitude, p.longitude, p.latitude) >= 100:
@@ -143,8 +155,6 @@ if uploaded_file:
                         if item['id'] not in seen: seen.add(item['id']); found_raw.append(item)
 
             final_pois, locs = [], {k: [] for k in selected_keys}
-            min_deg = MIN_GAP_KM / 111.0
-
             for item in found_raw:
                 tags = item.get('tags', {})
                 cat = None
@@ -163,10 +173,9 @@ if uploaded_file:
 
                 if not cat or cat not in selected_keys: continue
                 lat, lon = item['lat'], item['lon']
-                if any(sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg for (alat, alon) in locs[cat]): continue
+                if any(sqrt((alat-lat)**2 + (alon-lon)**2) < (MIN_GAP_KM/111.0) for (alat, alon) in locs[cat]): continue
 
-                # RICH DATA
-                name = tags.get('name') or tags.get('brand') or tags.get('operator') or (cat if cat != "Cemetery" else "Cemetery (Check Water)")
+                name = tags.get('name') or tags.get('brand') or tags.get('operator') or (cat if cat != "Cemetery" else "Cemetery (Water)")
                 bits = []
                 if tags.get('opening_hours'): bits.append(f"🕒 {tags.get('opening_hours')}")
                 if tags.get('phone'): bits.append(f"📞 {tags.get('phone')}")
@@ -175,18 +184,10 @@ if uploaded_file:
                 
                 km_mark = get_nearest_km(lat, lon, track_dist_data)
                 desc_str = f"{cat} | KM {km_mark:.1f}" + (" | " + " | ".join(bits) if bits else "")
-
-                final_pois.append({
-                    "km": km_mark, "cat": cat, "name": name, "lat": lat, "lon": lon, "desc": desc_str,
-                    "hours": tags.get('opening_hours', ""), "phone": tags.get('phone', ""),
-                    "symbol": amenity_config[cat]["icon"], "color": amenity_config[cat]["color"],
-                    "gmap": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-                })
+                final_pois.append({"km": km_mark, "cat": cat, "name": name, "lat": lat, "lon": lon, "desc": desc_str, "hours": tags.get('opening_hours', ""), "phone": tags.get('phone', ""), "symbol": amenity_config[cat]["icon"], "color": amenity_config[cat]["color"]})
                 locs[cat].append((lat, lon))
 
             final_pois.sort(key=lambda x: x['km'])
-            
-            # PREPARE FILES
             g_out = gpxpy.gpx.GPX()
             for t in gpx.tracks: g_out.tracks.append(t)
             for p in final_pois:
@@ -194,40 +195,32 @@ if uploaded_file:
                 w.description, w.symbol, w.type = p['desc'], p['symbol'], p['cat']
                 g_out.waypoints.append(w)
             
-            df = pd.DataFrame(final_pois)
             st.session_state.results = {
-                "df": df, "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
+                "df": pd.DataFrame(final_pois), "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
                 "path": [[p.longitude, p.latitude] for p in raw_pts[::30]],
-                "slat": raw_pts[0].latitude, "slon": raw_pts[0].longitude,
-                "fname": f"{uploaded_file.name.split('.')[0]}_enriched.gpx"
+                "slat": raw_pts[0].latitude, "slon": raw_pts[0].longitude, "fname": f"{uploaded_file.name.split('.')[0]}_enriched.gpx"
             }
             st.session_state.status = 'complete'
-            status_bar.update(label="Scan Complete!", state="complete")
             st.rerun()
         except Exception as e:
             st.error(f"Error: {e}"); st.session_state.status = 'idle'
 
-    # --- 7. DISPLAY RESULTS (STATIONARY) ---
+    # --- 7. DISPLAY ---
     if st.session_state.status == 'complete' and st.session_state.results:
         res = st.session_state.results
         st.subheader("📊 Results")
-        
         c1, c2 = st.columns([1, 2])
         with c1:
-            st.dataframe(res['df']['cat'].value_counts().reset_index().rename(columns={'count':'Count','cat':'Category'}), hide_index=True)
+            # Universal column renaming to avoid KeyErrors
+            counts = res['df']['cat'].value_counts().reset_index()
+            counts.columns = ['Category', 'Count']
+            st.dataframe(counts, hide_index=True)
         with c2:
             map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"**{p['name']}**\n{p['desc']}"} for p in res['pois']]
-            st.pydeck_chart(pdk.Deck(
-                initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=10),
-                layers=[
-                    pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2),
-                    pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)
-                ], tooltip={"text": "{info}"}
-            ))
+            st.pydeck_chart(pdk.Deck(initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=10), layers=[pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2), pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)], tooltip={"text": "{info}"}))
         
         dl1, dl2 = st.columns(2)
         dl1.download_button("⬇️ Download GPX", res['gpx_bytes'], res['fname'], "application/gpx+xml", type="primary")
         dl2.download_button("⬇️ Download CSV", res['df'].to_csv(index=False).encode('utf-8'), "Cuesheet.csv", "text/csv")
-        
-        if st.button("🔄 Start New File"):
+        if st.button("🔄 New Scan"):
             st.session_state.status = 'idle'; st.rerun()
