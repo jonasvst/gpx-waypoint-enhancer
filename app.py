@@ -21,44 +21,34 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📍 GPS Enricher: Deep Data")
-st.markdown("Turn any GPX track into a survival-ready route with water, food, and fuel stops.")
+st.title("📍 GPS Enricher")
+st.markdown("Enrich your GPX track with detailed roadside amenities.")
 
-# --- 1. EXPANDED USER GUIDE ---
-with st.expander("📘 **User Guide: How it works**"):
+# --- 1. USER GUIDE (REWRITTEN) ---
+with st.expander("📘 **User Guide & Logic**"):
     st.markdown("""
-    ### **1. Smart Scanning Strategy**
-    * **Strict Roadside Scan:** We look **50 meters** sideways from your track. We ignore things that require a detour.
-    * **No Blind Spots:** We scan every **100 meters** along your route to ensure 100% coverage.
-    * **Deep Data Extraction:** We don't just find "Water." We find:
-        * **Names & Brands** (e.g., "Shell", "Coop", "Public Fountain")
-        * **🕒 Opening Hours** (know if the shop is open at night)
-        * **📞 Phone Numbers** (for hotels/mechanics)
-        * **💵 Fees** (paid toilets vs free)
-        * **🚰 Quality** (potable vs non-potable water)
+    ### **1. Scanning Logic**
+    * **Range:** The tool scans a **50m radius** along your track. It intentionally ignores amenities further away to ensure you only see stops that require zero detour.
+    * **Coverage:** It samples your route every **100m** to guarantee full coverage of the path.
+    * **De-Cluttering:** To keep your GPS readable, the tool applies a "minimum gap" filter. For example, if it finds a gas station, it suppresses other gas stations for the next 2km (configurable), while still allowing other types (like Water) to appear.
 
-    ### **2. De-Cluttering**
-    * **Smart Density:** If we find a Gas Station, we hide other Gas Stations for the next **2km** (configurable). This keeps your GPS screen readable in towns.
-    * **Category Isolation:** Finding a Gas Station *does not* block us from finding Water right next to it.
-    
-    ### **3. Supported Categories**
-    * **💧 Water:** Fountains, Springs, Taps, and **Cemeteries** (marked with Water icon).
-    * **🛒 Shops:** Supermarkets, Convenience stores, Bakeries.
-    * **⛽ Fuel:** 24/7 stations (often with food/water).
-    * **🍔 Food:** Restaurants, Fast Food, Cafes.
-    * **🚽 Toilets:** Public restrooms.
-    * **🛏️ Sleep:** Hotels, Hostels, Guest Houses.
-    * **⛺ Camping:** Campsites.
-    * **💊 Pharmacy:** Medical supplies.
-    * **🔧 Bike Shop:** Repairs and parts.
-    * **🏧 ATM:** Cash machines.
-    * **🚆 Train:** Stations (for emergency bail-out).
+    ### **2. Data Extraction**
+    The tool queries specific tags from OpenStreetMap to populate the cue sheet:
+    * **Identity:** Replaces generic labels (e.g., "Shop") with specific brand names ("Coop", "Shell", "7-Eleven") whenever available.
+    * **Logistics:** Extracts `opening_hours` and `phone` numbers. This helps you gauge if a resupply point will be open at night.
+    * **Attributes:**
+        * **Water:** Checks for `drinking_water=yes/no` to flag potable vs non-potable sources.
+        * **Toilets:** Checks for `fee=yes/no` to indicate if payment is required.
+    * *Note: Detailed data depends on OpenStreetMap completeness. If a tag is missing in OSM, it will not appear here.*
+
+    ### **3. Support**
+    For issues, bugs, or feature requests, please contact: **jonas@verest.ch**
     """)
 
 # --- 2. UPLOAD ---
 uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", type=['gpx'], disabled=st.session_state.running)
 
-# --- 3. SETTINGS & FILTERS ---
+# --- 3. SETTINGS ---
 if uploaded_file:
     st.subheader("⚙️ Configuration")
     
@@ -66,13 +56,13 @@ if uploaded_file:
         "🧹 **Map Density (Min Gap)**", 
         0.0, 10.0, 2.0, 0.5,
         format="%.1f km",
-        help="Prevents clutter. Example: If set to 2.0km, we won't mark two Supermarkets within 2km of each other.",
+        help="Controls the minimum distance between two items of the same category. Higher values = Cleaner map. Lower values = More data.",
         disabled=st.session_state.running
     )
 
     st.caption("Select amenities to scan for:")
 
-    # HIDDEN CONSTANTS
+    # CONSTANTS
     RADIUS = 50        
     SAMPLE_STEP = 100  
 
@@ -87,7 +77,7 @@ if uploaded_file:
             "icon": "Water", "color": [0, 128, 255]
         },
         "Cemetery": {
-            "label": "⚰️ Cemeteries",
+            "label": "⚰️ Cemeteries (Water)",
             "query": """node["amenity"~"grave_yard"](around:{radius},{coords})""",
             "icon": "Water", "color": [0, 100, 255]
         },
@@ -112,14 +102,13 @@ if uploaded_file:
             if st.checkbox(cfg["label"], value=(key in defaults), disabled=st.session_state.running):
                 selected_keys.append(key)
 
-    # --- ACTION BUTTONS ---
     st.markdown("---")
     col_start, col_stop = st.columns([3, 1])
     
     with col_start:
         if not st.session_state.running:
             if st.button("🚀 Start Scan", type="primary"):
-                if not selected_keys: st.error("Please select at least one amenity.")
+                if not selected_keys: st.error("Please select amenities.")
                 else:
                     st.session_state.running = True
                     st.rerun()
@@ -133,7 +122,7 @@ if uploaded_file:
 # --- ENGINE ---
 BATCH_SIZE = 25
 WORKERS = 4
-HEADERS = {"User-Agent": "GPX-Enricher/19.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/21.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -193,14 +182,13 @@ if st.session_state.running:
     try:
         gpx = gpxpy.parse(uploaded_file)
         
-        # 1. Flatten & Distance
+        # 1. Resample
         raw_pts = []
         for t in gpx.tracks:
             for s in t.segments:
                 raw_pts.extend(s.points)
         track_data = calculate_track_distance(raw_pts)
         
-        # 2. Resample
         scan_pts = []
         last = None
         for p in raw_pts:
@@ -209,39 +197,36 @@ if st.session_state.running:
                 last = p
         
         batches = [scan_pts[i:i+BATCH_SIZE] for i in range(0, len(scan_pts), BATCH_SIZE)]
-        total_batches = len(batches)
+        total = len(batches)
         
         found_raw = []
-        seen_ids = set()
+        seen = set()
         prog = status.progress(0)
-        start_time = time.time()
+        start_t = time.time()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as exc:
             futures = {exc.submit(fetch_batch, (b, selected_keys)): i for i, b in enumerate(batches)}
             for i, f in enumerate(concurrent.futures.as_completed(futures)):
-                completed = i + 1
-                percent = completed / total_batches
-                prog.progress(percent)
-                
-                elapsed = time.time() - start_time
-                if completed > 0:
-                    avg = elapsed / completed
-                    rem = int(avg * (total_batches - completed))
+                comp = i + 1
+                prog.progress(comp / total)
+                elapsed = time.time() - start_t
+                if comp > 0:
+                    avg = elapsed / comp
+                    rem = int(avg * (total - comp))
                     m, s = divmod(rem, 60)
-                    status.update(label=f"Scanning... {int(percent*100)}% (Est. {m}m {s}s)")
-                
+                    status.update(label=f"Scanning... {int((comp/total)*100)}% (Est. {m}m {s}s)")
                 for item in f.result():
-                    if item['id'] not in seen_ids:
-                        seen_ids.add(item['id'])
+                    if item['id'] not in seen:
+                        seen.add(item['id'])
                         found_raw.append(item)
         
-        # 3. Post-Processing
-        status.write("Cleaning & Calculating KM markers...")
+        # 2. Enrich
+        status.write("Enriching data...")
         final_pois = []
-        accepted_locs = {k: [] for k in selected_keys}
+        locs = {k: [] for k in selected_keys}
         min_deg = MIN_GAP_KM / 111.0
         
-        def get_cat(item):
+        def identify_cat(item):
             tags = item.get('tags', {})
             if "Cemetery" in selected_keys and tags.get("amenity") == "grave_yard": return "Cemetery"
             if "Water" in selected_keys:
@@ -263,36 +248,31 @@ if st.session_state.running:
             return None
 
         for item in found_raw:
-            cat = get_cat(item)
+            cat = identify_cat(item)
             if not cat: continue
-            
             lat, lon = item['lat'], item['lon']
             
-            # De-clutter check
+            # Gap Check
             too_close = False
-            for (alat, alon) in accepted_locs[cat]:
+            for (alat, alon) in locs[cat]:
                 if sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg:
                     too_close = True
                     break
             
             if not too_close:
                 tags = item.get('tags', {})
-                
-                # --- DEEP DATA ---
                 name = tags.get('name')
                 if not name:
-                    name = tags.get('brand') or tags.get('operator')
+                    name = tags.get('brand') or tags.get('operator') or tags.get('addr:city')
                     if not name:
-                        city = tags.get('addr:city')
-                        if city: name = f"{cat} ({city})"
-                        else: 
-                            if cat == "Cemetery": name = "Cemetery (Check Tap)"
-                            else: name = cat
-
+                        if cat == "Cemetery": name = "Cemetery (Check Tap)"
+                        else: name = cat
+                
+                # Details
                 details = []
                 hrs = tags.get('opening_hours')
                 if hrs: details.append(f"🕒 {hrs}")
-                ph = tags.get('phone') or tags.get('contact:phone')
+                ph = tags.get('phone')
                 if ph: details.append(f"📞 {ph}")
                 fee = tags.get('fee')
                 if fee == 'yes': details.append("💵 Paid")
@@ -300,8 +280,6 @@ if st.session_state.running:
                 drink = tags.get('drinking_water')
                 if drink == 'yes': details.append("🚰 Potable")
                 elif drink == 'no': details.append("⚠️ Not Potable")
-                access = tags.get('access')
-                if access == 'private': details.append("🚫 Private")
                 
                 desc_str = f"{cat}"
                 if details: desc_str += " | " + " | ".join(details)
@@ -309,18 +287,14 @@ if st.session_state.running:
                 km_mark = get_nearest_km(lat, lon, track_data)
                 
                 final_pois.append({
-                    "km": km_mark,
-                    "cat": cat,
-                    "name": name,
+                    "km": km_mark, "cat": cat, "name": name,
                     "lat": lat, "lon": lon,
                     "desc": desc_str,
-                    "hours": hrs or "",
-                    "phone": ph or "",
-                    "city": tags.get('addr:city', ""),
+                    "hours": hrs or "", "phone": ph or "", "city": tags.get('addr:city', ""),
                     "symbol": amenity_config[cat]["icon"],
                     "gmap": f"http://googleusercontent.com/maps.google.com/?q={lat},{lon}"
                 })
-                accepted_locs[cat].append((lat, lon))
+                locs[cat].append((lat, lon))
         
         final_pois.sort(key=lambda x: x['km'])
         status.update(label="Complete!", state="complete", expanded=False)
@@ -328,7 +302,7 @@ if st.session_state.running:
         # --- RESULTS ---
         st.subheader("📊 Results")
         
-        # Summary
+        # Summary & Map
         df = pd.DataFrame(final_pois)
         if not df.empty:
             c1, c2 = st.columns([1, 2])
@@ -337,20 +311,34 @@ if st.session_state.running:
                 counts.columns = ['Category', 'Count']
                 st.dataframe(counts, hide_index=True)
             with c2:
-                # Map
-                map_data = [{"coordinates": [p['lon'], p['lat']], "color": amenity_config[p['cat']]['color'], "name": p['name']} for p in final_pois]
+                # RICH TOOLTIP MAP
+                map_data = []
+                for p in final_pois:
+                    info_lines = [f"**{p['name']}** ({p['cat']})"]
+                    info_lines.append(f"📍 Km {p['km']:.1f}")
+                    if p['city']: info_lines.append(f"🏙️ {p['city']}")
+                    if p['hours']: info_lines.append(f"🕒 {p['hours']}")
+                    if p['phone']: info_lines.append(f"📞 {p['phone']}")
+                    
+                    map_data.append({
+                        "coordinates": [p['lon'], p['lat']],
+                        "color": amenity_config[p['cat']]['color'],
+                        "info": "\n".join(info_lines)
+                    })
+                    
                 path_data = [[p.longitude, p.latitude] for p in raw_pts[::30]]
                 st.pydeck_chart(pdk.Deck(
                     initial_view_state=pdk.ViewState(latitude=raw_pts[0].latitude, longitude=raw_pts[0].longitude, zoom=8),
                     layers=[
                         pdk.Layer("PathLayer", [{"path": path_data}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2),
                         pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=200, pickable=True)
-                    ], tooltip={"text": "{name}\n{desc}"}
+                    ], tooltip={"text": "{info}"}
                 ))
             
             st.success(f"Enriched with {len(final_pois)} points.")
             
-            col_gpx, col_csv = st.columns(2)
+            # Downloads
+            c_gpx, c_csv = st.columns(2)
             
             # GPX
             for p in final_pois:
@@ -362,7 +350,7 @@ if st.session_state.running:
             out_gpx = BytesIO()
             out_gpx.write(gpx.to_xml().encode('utf-8'))
             out_gpx.seek(0)
-            with col_gpx:
+            with c_gpx:
                 st.download_button("⬇️ Download GPX", out_gpx, "Enriched.gpx", "application/gpx+xml", type="primary")
             
             # CSV
@@ -370,9 +358,9 @@ if st.session_state.running:
             csv_df['km'] = csv_df['km'].round(1)
             csv_df.columns = ['KM', 'Type', 'Name', 'Hours', 'Phone', 'City', 'Lat', 'Lon', 'Map Link']
             out_csv = csv_df.to_csv(index=False).encode('utf-8')
-            with col_csv:
+            with c_csv:
                 st.download_button("⬇️ Download CSV", out_csv, "CueSheet.csv", "text/csv")
-
+        
         else:
             st.warning("No amenities found.")
 
