@@ -11,8 +11,9 @@ from io import BytesIO
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered")
 
+# --- 1. STATE MANAGEMENT ---
 if 'status' not in st.session_state:
-    st.session_state.status = 'idle'
+    st.session_state.status = 'idle'  # idle, running, complete
 if 'results' not in st.session_state:
     st.session_state.results = None
 
@@ -25,28 +26,31 @@ st.markdown("""
 
 st.title("📍 GPS Enricher")
 
-# --- 1. USER GUIDE ---
+# --- 2. USER GUIDE ---
 with st.expander("📘 **User Guide: Logic & Legend**"):
     st.markdown("""
     ### **1. Scanning Logic**
-    * **Range:** Scans a **50m radius** along your track.
-    * **Coverage:** Samples every **100m**.
-    * **De-Cluttering:** Set a "minimum gap" (default 2km) to prevent icon overcrowding.
+    * **Range:** Scans a **50m radius** along your track for zero-detour stops.
+    * **Coverage:** Samples every **100m** for full coverage.
+    * **De-Cluttering:** Applies a **Min Gap** filter to prevent icon stacking in towns.
 
     ### **2. Data Extraction**
-    Extracts from OpenStreetMap: Brand names, **Opening Hours**, **Phone Numbers**, and attributes like water drinkability.
+    * **Identity:** Brand names ("Shell", "Coop") instead of generic labels.
+    * **Logistics:** **Opening Hours** and **Phone Numbers**.
+    * **Attributes:** Water drinkability, Toilet fees, etc.
 
     ### **3. Support**
-    Contact: **jonas@verest.ch**
+    For issues or feature requests: **jonas@verest.ch**
     """)
 
-# --- 2. UPLOAD ---
+# --- 3. UPLOAD ---
 is_disabled = st.session_state.status == 'running'
 uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", type=['gpx'], disabled=is_disabled)
 
-# --- 3. SETTINGS ---
+# --- 4. CONFIGURATION ---
 if uploaded_file:
     st.subheader("⚙️ Configuration")
+    
     MIN_GAP_KM = st.slider("🧹 **Map Density (Min Gap)**", 0.0, 10.0, 2.0, 0.5, format="%.1f km", disabled=is_disabled)
 
     amenity_config = {
@@ -64,7 +68,12 @@ if uploaded_file:
         "Train": {"label": "🚆 Train Stations", "query": 'node["railway"~"station|halt"](around:{radius},{coords})', "icon": "Generic", "color": [50, 50, 50]}
     }
 
-    selected_keys = [k for i, (k, v) in enumerate(amenity_config.items()) if st.checkbox(v["label"], value=(k in ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]), key=f"chk_{k}", disabled=is_disabled)]
+    cols = st.columns(3)
+    selected_keys = []
+    for i, (key, cfg) in enumerate(amenity_config.items()):
+        with cols[i % 3]:
+            if st.checkbox(cfg["label"], value=(key in ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]), key=f"sel_{key}", disabled=is_disabled):
+                selected_keys.append(key)
 
     st.markdown("---")
     c_start, c_stop = st.columns([3, 1])
@@ -78,30 +87,48 @@ if uploaded_file:
         st.session_state.status = 'idle'
         st.rerun()
 
-    # --- HELPERS ---
+    # --- 5. ENGINE FUNCTIONS ---
     def haversine(lon1, lat1, lon2, lat2):
         lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
         dlon, dlat = lon2 - lon1, lat2 - lat1
         a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
         return 6371000 * (2 * asin(sqrt(a)))
 
+    def calculate_track_distance(points):
+        total_dist, last, points_with_dist = 0, None, []
+        for p in points:
+            if last: total_dist += haversine(last.longitude, last.latitude, p.longitude, p.latitude)
+            points_with_dist.append({"lat": p.latitude, "lon": p.longitude, "cum_dist": total_dist})
+            last = p
+        return points_with_dist
+
+    def get_nearest_km(poi_lat, poi_lon, track_data):
+        min_dist, km_mark = float('inf'), 0
+        for tp in track_data[::10]:
+            d = (tp['lat'] - poi_lat)**2 + (tp['lon'] - poi_lon)**2
+            if d < min_dist: min_dist, km_mark = d, tp['cum_dist']
+        return km_mark / 1000.0
+
     def fetch_batch(args):
         pts, keys = args
         coords = ",".join([f"{round(p.latitude,5)},{round(p.longitude,5)}" for p in pts])
-        query = f"[out:json][timeout:25];({''.join([amenity_config[k]['query'].format(radius=50, coords=coords)+';' for k in keys])});out body;"
-        for url in ["https://overpass.kumi.systems/api/interpreter", "https://api.openstreetmap.fr/oapi/interpreter"]:
+        parts = [amenity_config[k]["query"].format(radius=50, coords=coords) + ";" for k in keys]
+        q = f"[out:json][timeout:25];({''.join(parts)});out body;"
+        for url in ["https://overpass.kumi.systems/api/interpreter", "https://api.openstreetmap.fr/oapi/interpreter", "https://overpass-api.de/api/interpreter"]:
             try:
-                r = requests.post(url, data={'data': query}, timeout=30)
+                r = requests.post(url, data={'data': q}, timeout=30)
                 if r.status_code == 200: return r.json().get('elements', [])
             except: continue
         return []
 
-    # --- ENGINE ---
+    # --- 6. CORE SCANNING ---
     if st.session_state.status == 'running':
-        status = st.status("Scanning track...", expanded=True)
+        status_bar = st.status("Scanning track...", expanded=True)
         try:
             gpx = gpxpy.parse(uploaded_file)
             raw_pts = [p for t in gpx.tracks for s in t.segments for p in s.points]
+            track_dist_data = calculate_track_distance(raw_pts)
+            
             scan_pts, last = [], None
             for p in raw_pts:
                 if not last or haversine(last.longitude, last.latitude, p.longitude, p.latitude) >= 100:
@@ -116,69 +143,91 @@ if uploaded_file:
                         if item['id'] not in seen: seen.add(item['id']); found_raw.append(item)
 
             final_pois, locs = [], {k: [] for k in selected_keys}
+            min_deg = MIN_GAP_KM / 111.0
+
             for item in found_raw:
                 tags = item.get('tags', {})
-                # Robust Category ID
                 cat = None
                 if tags.get("amenity") == "grave_yard": cat = "Cemetery"
                 elif tags.get("amenity") in ["drinking_water", "fountain", "watering_place"] or tags.get("natural") == "spring": cat = "Water"
                 elif tags.get("amenity") == "toilets": cat = "Toilets"
-                elif "shop" in tags: cat = "Shops"
+                elif tags.get("shop") in ["supermarket", "convenience", "kiosk", "bakery", "general"]: cat = "Shops"
                 elif tags.get("amenity") == "fuel": cat = "Fuel"
                 elif tags.get("amenity") in ["restaurant", "cafe", "fast_food"]: cat = "Food"
-                elif "tourism" in tags: cat = "Sleep" if tags.get("tourism") != "camp_site" else "Camping"
-                
+                elif tags.get("tourism") == "camp_site": cat = "Camping"
+                elif tags.get("tourism") in ["hotel", "hostel", "guest_house"]: cat = "Sleep"
+                elif tags.get("shop") == "bicycle": cat = "Bike"
+                elif tags.get("amenity") == "pharmacy": cat = "Pharm"
+                elif tags.get("amenity") == "atm": cat = "ATM"
+                elif tags.get("railway") in ["station", "halt"]: cat = "Train"
+
                 if not cat or cat not in selected_keys: continue
                 lat, lon = item['lat'], item['lon']
-                if any(sqrt((alat-lat)**2 + (alon-lon)**2) < (MIN_GAP_KM/111.0) for (alat, alon) in locs[cat]): continue
+                if any(sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg for (alat, alon) in locs[cat]): continue
 
-                # BUILD DESCRIPTION
-                name = tags.get('name') or tags.get('brand') or tags.get('operator') or cat
+                # RICH DATA
+                name = tags.get('name') or tags.get('brand') or tags.get('operator') or (cat if cat != "Cemetery" else "Cemetery (Check Water)")
                 bits = []
                 if tags.get('opening_hours'): bits.append(f"🕒 {tags.get('opening_hours')}")
                 if tags.get('phone'): bits.append(f"📞 {tags.get('phone')}")
+                if tags.get('fee') == 'yes': bits.append("💵 Paid")
                 if tags.get('drinking_water') == 'yes': bits.append("🚰 Potable")
-                desc_str = f"{cat} | " + " | ".join(bits) if bits else cat
+                
+                km_mark = get_nearest_km(lat, lon, track_dist_data)
+                desc_str = f"{cat} | KM {km_mark:.1f}" + (" | " + " | ".join(bits) if bits else "")
 
                 final_pois.append({
-                    "km": 0, "cat": cat, "name": name, "lat": lat, "lon": lon, "desc": desc_str,
+                    "km": km_mark, "cat": cat, "name": name, "lat": lat, "lon": lon, "desc": desc_str,
                     "hours": tags.get('opening_hours', ""), "phone": tags.get('phone', ""),
-                    "symbol": amenity_config[cat]["icon"], "color": amenity_config[cat]["color"]
+                    "symbol": amenity_config[cat]["icon"], "color": amenity_config[cat]["color"],
+                    "gmap": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
                 })
                 locs[cat].append((lat, lon))
 
-            # Store in session
+            final_pois.sort(key=lambda x: x['km'])
+            
+            # PREPARE FILES
             g_out = gpxpy.gpx.GPX()
             for t in gpx.tracks: g_out.tracks.append(t)
             for p in final_pois:
                 w = gpxpy.gpx.GPXWaypoint(latitude=p['lat'], longitude=p['lon'], name=p['name'])
                 w.description, w.symbol, w.type = p['desc'], p['symbol'], p['cat']
                 g_out.waypoints.append(w)
-
+            
+            df = pd.DataFrame(final_pois)
             st.session_state.results = {
-                "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
+                "df": df, "pois": final_pois, "gpx_bytes": g_out.to_xml().encode('utf-8'),
                 "path": [[p.longitude, p.latitude] for p in raw_pts[::30]],
-                "slat": raw_pts[0].latitude, "slon": raw_pts[0].longitude
+                "slat": raw_pts[0].latitude, "slon": raw_pts[0].longitude,
+                "fname": f"{uploaded_file.name.split('.')[0]}_enriched.gpx"
             }
             st.session_state.status = 'complete'
+            status_bar.update(label="Scan Complete!", state="complete")
             st.rerun()
         except Exception as e:
             st.error(f"Error: {e}"); st.session_state.status = 'idle'
 
-    # --- RESULTS ---
+    # --- 7. DISPLAY RESULTS (STATIONARY) ---
     if st.session_state.status == 'complete' and st.session_state.results:
         res = st.session_state.results
         st.subheader("📊 Results")
-        map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"**{p['name']}**\n{p['desc']}"} for p in res['pois']]
-        st.pydeck_chart(pdk.Deck(
-            initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=11),
-            layers=[
-                pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2),
-                pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=200, pickable=True)
-            ], tooltip={"text": "{info}"}
-        ))
         
-        c1, c2 = st.columns(2)
-        c1.download_button("⬇️ Download GPX", res['gpx_bytes'], "enriched.gpx", "application/gpx+xml", type="primary")
-        if st.button("🔄 New Scan"):
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.dataframe(res['df']['cat'].value_counts().reset_index().rename(columns={'count':'Count','cat':'Category'}), hide_index=True)
+        with c2:
+            map_data = [{"coordinates": [p['lon'], p['lat']], "color": p['color'], "info": f"**{p['name']}**\n{p['desc']}"} for p in res['pois']]
+            st.pydeck_chart(pdk.Deck(
+                initial_view_state=pdk.ViewState(latitude=res['slat'], longitude=res['slon'], zoom=10),
+                layers=[
+                    pdk.Layer("PathLayer", [{"path": res['path']}], get_path="path", get_color=[255, 0, 0], width_min_pixels=2),
+                    pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=250, pickable=True)
+                ], tooltip={"text": "{info}"}
+            ))
+        
+        dl1, dl2 = st.columns(2)
+        dl1.download_button("⬇️ Download GPX", res['gpx_bytes'], res['fname'], "application/gpx+xml", type="primary")
+        dl2.download_button("⬇️ Download CSV", res['df'].to_csv(index=False).encode('utf-8'), "Cuesheet.csv", "text/csv")
+        
+        if st.button("🔄 Start New File"):
             st.session_state.status = 'idle'; st.rerun()
