@@ -9,7 +9,7 @@ from math import radians, cos, sin, asin, sqrt
 from io import BytesIO
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="GPS Enricher V18 (Deep Data)", page_icon="🕵️", layout="centered")
+st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered")
 
 if 'running' not in st.session_state:
     st.session_state.running = False
@@ -17,72 +17,123 @@ if 'running' not in st.session_state:
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; height: 3em; font-weight: bold; }
-    div[data-testid="stExpander"] { display: none; }
+    div[data-testid="stExpander"] { border: 1px solid #e6e6e6; border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🕵️ GPS Enricher: Deep Data")
-st.markdown("Extracts **Names, Opening Hours, Phone Numbers, and Fees** to create a detailed Cue Sheet.")
+st.title("📍 GPS Enricher: Deep Data")
+st.markdown("Turn any GPX track into a survival-ready route with water, food, and fuel stops.")
 
-# --- 1. UPLOAD ---
-uploaded_file = st.file_uploader("📂 Drop GPX file", type=['gpx'], disabled=st.session_state.running)
+# --- 1. EXPANDED USER GUIDE ---
+with st.expander("📘 **User Guide: How it works**"):
+    st.markdown("""
+    ### **1. Smart Scanning Strategy**
+    * **Strict Roadside Scan:** We look **50 meters** sideways from your track. We ignore things that require a detour.
+    * **No Blind Spots:** We scan every **100 meters** along your route to ensure 100% coverage.
+    * **Deep Data Extraction:** We don't just find "Water." We find:
+        * **Names & Brands** (e.g., "Shell", "Coop", "Public Fountain")
+        * **🕒 Opening Hours** (know if the shop is open at night)
+        * **📞 Phone Numbers** (for hotels/mechanics)
+        * **💵 Fees** (paid toilets vs free)
+        * **🚰 Quality** (potable vs non-potable water)
 
-# --- 2. SETTINGS ---
-st.subheader("⚙️ Settings")
-MIN_GAP_KM = st.slider(
-    "🧹 **Density (Min Gap km)**", 
-    0.0, 10.0, 2.0, 0.5,
-    help="0 = Show everything. 2.0 = Clean map.",
-    disabled=st.session_state.running
-)
+    ### **2. De-Cluttering**
+    * **Smart Density:** If we find a Gas Station, we hide other Gas Stations for the next **2km** (configurable). This keeps your GPS screen readable in towns.
+    * **Category Isolation:** Finding a Gas Station *does not* block us from finding Water right next to it.
+    
+    ### **3. Supported Categories**
+    * **💧 Water:** Fountains, Springs, Taps, and **Cemeteries** (marked with Water icon).
+    * **🛒 Shops:** Supermarkets, Convenience stores, Bakeries.
+    * **⛽ Fuel:** 24/7 stations (often with food/water).
+    * **🍔 Food:** Restaurants, Fast Food, Cafes.
+    * **🚽 Toilets:** Public restrooms.
+    * **🛏️ Sleep:** Hotels, Hostels, Guest Houses.
+    * **⛺ Camping:** Campsites.
+    * **💊 Pharmacy:** Medical supplies.
+    * **🔧 Bike Shop:** Repairs and parts.
+    * **🏧 ATM:** Cash machines.
+    * **🚆 Train:** Stations (for emergency bail-out).
+    """)
 
-# --- 3. CATEGORIES ---
-st.caption("Select Amenities:")
+# --- 2. UPLOAD ---
+uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", type=['gpx'], disabled=st.session_state.running)
 
-# HIDDEN CONSTANTS
-RADIUS = 50        
-SAMPLE_STEP = 100  
+# --- 3. SETTINGS & FILTERS ---
+if uploaded_file:
+    st.subheader("⚙️ Configuration")
+    
+    MIN_GAP_KM = st.slider(
+        "🧹 **Map Density (Min Gap)**", 
+        0.0, 10.0, 2.0, 0.5,
+        format="%.1f km",
+        help="Prevents clutter. Example: If set to 2.0km, we won't mark two Supermarkets within 2km of each other.",
+        disabled=st.session_state.running
+    )
 
-amenity_config = {
-    "Water": {
-        "label": "💧 Water",
-        "query": """(
-            node["amenity"~"drinking_water|fountain|watering_place"](around:{radius},{coords});
-            node["natural"~"spring"](around:{radius},{coords});
-            node["man_made"~"water_tap|water_well"](around:{radius},{coords});
-        )""",
-        "icon": "Water", "color": [0, 128, 255]
-    },
-    "Cemetery": {
-        "label": "⚰️ Cemeteries",
-        "query": """node["amenity"~"grave_yard"](around:{radius},{coords})""",
-        "icon": "Water", "color": [0, 100, 255]
-    },
-    "Toilets": {"label": "🚽 Toilets", "query": """node["amenity"~"toilets"](around:{radius},{coords})""", "icon": "Restroom", "color": [150, 150, 150]},
-    "Shops": {"label": "🛒 Supermarkets", "query": """node["shop"~"supermarket|convenience|kiosk|bakery|general"](around:{radius},{coords})""", "icon": "Convenience Store", "color": [0, 200, 0]},
-    "Fuel": {"label": "⛽ Fuel Stations", "query": """node["amenity"~"fuel"](around:{radius},{coords})""", "icon": "Gas Station", "color": [255, 140, 0]},
-    "Food": {"label": "🍔 Restaurants", "query": """node["amenity"~"restaurant|fast_food|cafe"](around:{radius},{coords})""", "icon": "Food", "color": [0, 200, 0]},
-    "Sleep": {"label": "🛏️ Hotels", "query": """node["tourism"~"hotel|hostel|guest_house"](around:{radius},{coords})""", "icon": "Lodging", "color": [128, 0, 128]},
-    "Camping": {"label": "⛺ Campsites", "query": """node["tourism"~"camp_site"](around:{radius},{coords})""", "icon": "Campground", "color": [34, 139, 34]},
-    "Bike": {"label": "🔧 Bike Shops", "query": """node["shop"~"bicycle"](around:{radius},{coords})""", "icon": "Bike Shop", "color": [255, 0, 0]},
-    "Pharm": {"label": "💊 Pharmacies", "query": """node["amenity"~"pharmacy"](around:{radius},{coords})""", "icon": "First Aid", "color": [255, 0, 0]},
-    "ATM": {"label": "🏧 ATMs", "query": """node["amenity"~"atm"](around:{radius},{coords})""", "icon": "Generic", "color": [0, 100, 0]},
-    "Train": {"label": "🚆 Train Stations", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
-}
+    st.caption("Select amenities to scan for:")
 
-cols = st.columns(3)
-selected_keys = []
-defaults = ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]
+    # HIDDEN CONSTANTS
+    RADIUS = 50        
+    SAMPLE_STEP = 100  
 
-for i, (key, cfg) in enumerate(amenity_config.items()):
-    with cols[i % 3]:
-        if st.checkbox(cfg["label"], value=(key in defaults), disabled=st.session_state.running):
-            selected_keys.append(key)
+    amenity_config = {
+        "Water": {
+            "label": "💧 Water & Taps",
+            "query": """(
+                node["amenity"~"drinking_water|fountain|watering_place"](around:{radius},{coords});
+                node["natural"~"spring"](around:{radius},{coords});
+                node["man_made"~"water_tap|water_well"](around:{radius},{coords});
+            )""",
+            "icon": "Water", "color": [0, 128, 255]
+        },
+        "Cemetery": {
+            "label": "⚰️ Cemeteries",
+            "query": """node["amenity"~"grave_yard"](around:{radius},{coords})""",
+            "icon": "Water", "color": [0, 100, 255]
+        },
+        "Toilets": {"label": "🚽 Toilets", "query": """node["amenity"~"toilets"](around:{radius},{coords})""", "icon": "Restroom", "color": [150, 150, 150]},
+        "Shops": {"label": "🛒 Supermarkets", "query": """node["shop"~"supermarket|convenience|kiosk|bakery|general"](around:{radius},{coords})""", "icon": "Convenience Store", "color": [0, 200, 0]},
+        "Fuel": {"label": "⛽ Fuel Stations", "query": """node["amenity"~"fuel"](around:{radius},{coords})""", "icon": "Gas Station", "color": [255, 140, 0]},
+        "Food": {"label": "🍔 Restaurants", "query": """node["amenity"~"restaurant|fast_food|cafe"](around:{radius},{coords})""", "icon": "Food", "color": [0, 200, 0]},
+        "Sleep": {"label": "🛏️ Hotels", "query": """node["tourism"~"hotel|hostel|guest_house"](around:{radius},{coords})""", "icon": "Lodging", "color": [128, 0, 128]},
+        "Camping": {"label": "⛺ Campsites", "query": """node["tourism"~"camp_site"](around:{radius},{coords})""", "icon": "Campground", "color": [34, 139, 34]},
+        "Bike": {"label": "🔧 Bike Shops", "query": """node["shop"~"bicycle"](around:{radius},{coords})""", "icon": "Bike Shop", "color": [255, 0, 0]},
+        "Pharm": {"label": "💊 Pharmacies", "query": """node["amenity"~"pharmacy"](around:{radius},{coords})""", "icon": "First Aid", "color": [255, 0, 0]},
+        "ATM": {"label": "🏧 ATMs", "query": """node["amenity"~"atm"](around:{radius},{coords})""", "icon": "Generic", "color": [0, 100, 0]},
+        "Train": {"label": "🚆 Train Stations", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
+    }
+
+    cols = st.columns(3)
+    selected_keys = []
+    defaults = ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]
+
+    for i, (key, cfg) in enumerate(amenity_config.items()):
+        with cols[i % 3]:
+            if st.checkbox(cfg["label"], value=(key in defaults), disabled=st.session_state.running):
+                selected_keys.append(key)
+
+    # --- ACTION BUTTONS ---
+    st.markdown("---")
+    col_start, col_stop = st.columns([3, 1])
+    
+    with col_start:
+        if not st.session_state.running:
+            if st.button("🚀 Start Scan", type="primary"):
+                if not selected_keys: st.error("Please select at least one amenity.")
+                else:
+                    st.session_state.running = True
+                    st.rerun()
+
+    with col_stop:
+        if st.session_state.running:
+            if st.button("🛑 Cancel"):
+                st.session_state.running = False
+                st.rerun()
 
 # --- ENGINE ---
 BATCH_SIZE = 25
 WORKERS = 4
-HEADERS = {"User-Agent": "GPX-DeepData/18.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/19.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -112,7 +163,7 @@ def calculate_track_distance(points):
 def get_nearest_km(poi_lat, poi_lon, track_data):
     min_dist = float('inf')
     km_mark = 0
-    for tp in track_data[::10]: # Optimization
+    for tp in track_data[::10]: 
         d = (tp['lat'] - poi_lat)**2 + (tp['lon'] - poi_lon)**2
         if d < min_dist:
             min_dist = d
@@ -137,24 +188,8 @@ def fetch_batch(args):
         except: continue
     return []
 
-# --- ACTIONS ---
-col_start, col_stop = st.columns([3, 1])
-with col_start:
-    if uploaded_file and not st.session_state.running:
-        if st.button("🚀 Start Scan", type="primary"):
-            if not selected_keys: st.error("Select amenities.")
-            else:
-                st.session_state.running = True
-                st.rerun()
-
-with col_stop:
-    if st.session_state.running:
-        if st.button("🛑 Cancel"):
-            st.session_state.running = False
-            st.rerun()
-
 if st.session_state.running:
-    status = st.status("Scanning...", expanded=True)
+    status = st.status("Initializing Scan...", expanded=True)
     try:
         gpx = gpxpy.parse(uploaded_file)
         
@@ -174,39 +209,39 @@ if st.session_state.running:
                 last = p
         
         batches = [scan_pts[i:i+BATCH_SIZE] for i in range(0, len(scan_pts), BATCH_SIZE)]
-        total = len(batches)
+        total_batches = len(batches)
         
         found_raw = []
-        seen = set()
+        seen_ids = set()
         prog = status.progress(0)
-        start_t = time.time()
+        start_time = time.time()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as exc:
             futures = {exc.submit(fetch_batch, (b, selected_keys)): i for i, b in enumerate(batches)}
             for i, f in enumerate(concurrent.futures.as_completed(futures)):
-                comp = i + 1
-                prog.progress(comp / total)
+                completed = i + 1
+                percent = completed / total_batches
+                prog.progress(percent)
                 
-                # Timer
-                elap = time.time() - start_t
-                if comp > 0:
-                    avg = elap / comp
-                    rem = int(avg * (total - comp))
+                elapsed = time.time() - start_time
+                if completed > 0:
+                    avg = elapsed / completed
+                    rem = int(avg * (total_batches - completed))
                     m, s = divmod(rem, 60)
-                    status.update(label=f"Scanning... (Est. {m}m {s}s)")
+                    status.update(label=f"Scanning... {int(percent*100)}% (Est. {m}m {s}s)")
                 
                 for item in f.result():
-                    if item['id'] not in seen:
-                        seen.add(item['id'])
+                    if item['id'] not in seen_ids:
+                        seen_ids.add(item['id'])
                         found_raw.append(item)
         
-        # 3. Smart Extraction
-        status.write("Enriching data...")
+        # 3. Post-Processing
+        status.write("Cleaning & Calculating KM markers...")
         final_pois = []
-        locs = {k: [] for k in selected_keys}
+        accepted_locs = {k: [] for k in selected_keys}
         min_deg = MIN_GAP_KM / 111.0
         
-        def identify_cat(item):
+        def get_cat(item):
             tags = item.get('tags', {})
             if "Cemetery" in selected_keys and tags.get("amenity") == "grave_yard": return "Cemetery"
             if "Water" in selected_keys:
@@ -228,14 +263,14 @@ if st.session_state.running:
             return None
 
         for item in found_raw:
-            cat = identify_cat(item)
+            cat = get_cat(item)
             if not cat: continue
             
             lat, lon = item['lat'], item['lon']
             
-            # Gap check
+            # De-clutter check
             too_close = False
-            for (alat, alon) in locs[cat]:
+            for (alat, alon) in accepted_locs[cat]:
                 if sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg:
                     too_close = True
                     break
@@ -243,52 +278,33 @@ if st.session_state.running:
             if not too_close:
                 tags = item.get('tags', {})
                 
-                # --- DEEP DATA EXTRACTION ---
-                
-                # 1. Name Strategy
+                # --- DEEP DATA ---
                 name = tags.get('name')
                 if not name:
                     name = tags.get('brand') or tags.get('operator')
                     if not name:
-                        # Fallback: Category + City?
                         city = tags.get('addr:city')
                         if city: name = f"{cat} ({city})"
                         else: 
                             if cat == "Cemetery": name = "Cemetery (Check Tap)"
                             else: name = cat
 
-                # 2. Details String
                 details = []
-                # Hours
                 hrs = tags.get('opening_hours')
                 if hrs: details.append(f"🕒 {hrs}")
-                
-                # Phone
                 ph = tags.get('phone') or tags.get('contact:phone')
                 if ph: details.append(f"📞 {ph}")
-                
-                # Fee
                 fee = tags.get('fee')
                 if fee == 'yes': details.append("💵 Paid")
                 elif fee == 'no': details.append("🆓 Free")
-                
-                # Drinking
                 drink = tags.get('drinking_water')
                 if drink == 'yes': details.append("🚰 Potable")
                 elif drink == 'no': details.append("⚠️ Not Potable")
-                
-                # Access
                 access = tags.get('access')
                 if access == 'private': details.append("🚫 Private")
-                elif access == 'permissive': details.append("⚠️ Permissive")
-                
-                # Indoor
-                indoor = tags.get('indoor')
-                if indoor == 'yes': details.append("🏠 Indoor")
                 
                 desc_str = f"{cat}"
-                if details:
-                    desc_str += " | " + " | ".join(details)
+                if details: desc_str += " | " + " | ".join(details)
                 
                 km_mark = get_nearest_km(lat, lon, track_data)
                 
@@ -304,12 +320,12 @@ if st.session_state.running:
                     "symbol": amenity_config[cat]["icon"],
                     "gmap": f"http://googleusercontent.com/maps.google.com/?q={lat},{lon}"
                 })
-                locs[cat].append((lat, lon))
+                accepted_locs[cat].append((lat, lon))
         
         final_pois.sort(key=lambda x: x['km'])
         status.update(label="Complete!", state="complete", expanded=False)
         
-        # --- PREVIEW ---
+        # --- RESULTS ---
         st.subheader("📊 Results")
         
         # Summary
@@ -334,7 +350,6 @@ if st.session_state.running:
             
             st.success(f"Enriched with {len(final_pois)} points.")
             
-            # --- DOWNLOADS ---
             col_gpx, col_csv = st.columns(2)
             
             # GPX
