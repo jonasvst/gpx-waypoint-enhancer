@@ -3,4 +3,3 @@ gpxpy
 requests
 pandas
 pydeck
-numpy
