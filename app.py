@@ -7,6 +7,7 @@ import pydeck as pdk
 import concurrent.futures
 from math import radians, cos, sin, asin, sqrt
 from io import BytesIO
+import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered")
@@ -24,25 +25,22 @@ st.markdown("""
 st.title("📍 GPS Enricher")
 st.markdown("Enrich your GPX track with detailed roadside amenities.")
 
-# --- 1. USER GUIDE (REWRITTEN) ---
+# --- 1. USER GUIDE ---
 with st.expander("📘 **User Guide & Logic**"):
     st.markdown("""
     ### **1. Scanning Logic**
-    * **Range:** The tool scans a **50m radius** along your track. It intentionally ignores amenities further away to ensure you only see stops that require zero detour.
-    * **Coverage:** It samples your route every **100m** to guarantee full coverage of the path.
-    * **De-Cluttering:** To keep your GPS readable, the tool applies a "minimum gap" filter. For example, if it finds a gas station, it suppresses other gas stations for the next 2km (configurable), while still allowing other types (like Water) to appear.
+    * **Range:** The tool scans a **50m radius** along your track to ensure zero-detour stops.
+    * **Coverage:** It samples every **100m** to guarantee full coverage.
+    * **De-Cluttering:** It applies a "minimum gap" filter (default 2km) to prevent icon stacking in towns.
 
     ### **2. Data Extraction**
-    The tool queries specific tags from OpenStreetMap to populate the cue sheet:
-    * **Identity:** Replaces generic labels (e.g., "Shop") with specific brand names ("Coop", "Shell", "7-Eleven") whenever available.
-    * **Logistics:** Extracts `opening_hours` and `phone` numbers. This helps you gauge if a resupply point will be open at night.
-    * **Attributes:**
-        * **Water:** Checks for `drinking_water=yes/no` to flag potable vs non-potable sources.
-        * **Toilets:** Checks for `fee=yes/no` to indicate if payment is required.
-    * *Note: Detailed data depends on OpenStreetMap completeness. If a tag is missing in OSM, it will not appear here.*
+    We extract deep details from OpenStreetMap:
+    * **Identity:** Brand names ("Shell", "Coop") instead of generic labels.
+    * **Logistics:** **Opening Hours** and **Phone Numbers**.
+    * **Attributes:** Water drinkability, Toilet fees, etc.
 
     ### **3. Support**
-    For issues, bugs, or feature requests, please contact: **jonas@verest.ch**
+    For issues or feature requests: **jonas@verest.ch**
     """)
 
 # --- 2. UPLOAD ---
@@ -56,7 +54,7 @@ if uploaded_file:
         "🧹 **Map Density (Min Gap)**", 
         0.0, 10.0, 2.0, 0.5,
         format="%.1f km",
-        help="Controls the minimum distance between two items of the same category. Higher values = Cleaner map. Lower values = More data.",
+        help="Controls map cleanliness. Higher = Fewer icons. Lower = More data.",
         disabled=st.session_state.running
     )
 
@@ -122,7 +120,7 @@ if uploaded_file:
 # --- ENGINE ---
 BATCH_SIZE = 25
 WORKERS = 4
-HEADERS = {"User-Agent": "GPX-Enricher/21.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/22.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -302,7 +300,6 @@ if st.session_state.running:
         # --- RESULTS ---
         st.subheader("📊 Results")
         
-        # Summary & Map
         df = pd.DataFrame(final_pois)
         if not df.empty:
             c1, c2 = st.columns([1, 2])
@@ -311,7 +308,7 @@ if st.session_state.running:
                 counts.columns = ['Category', 'Count']
                 st.dataframe(counts, hide_index=True)
             with c2:
-                # RICH TOOLTIP MAP
+                # MAP
                 map_data = []
                 for p in final_pois:
                     info_lines = [f"**{p['name']}** ({p['cat']})"]
@@ -337,8 +334,13 @@ if st.session_state.running:
             
             st.success(f"Enriched with {len(final_pois)} points.")
             
-            # Downloads
-            c_gpx, c_csv = st.columns(2)
+            # --- FILENAME LOGIC ---
+            original_name = uploaded_file.name
+            if original_name.lower().endswith(".gpx"):
+                stem = original_name[:-4]
+            else:
+                stem = original_name
+            out_filename = f"{stem}_enrichedwaypoints.gpx"
             
             # GPX
             for p in final_pois:
@@ -350,15 +352,17 @@ if st.session_state.running:
             out_gpx = BytesIO()
             out_gpx.write(gpx.to_xml().encode('utf-8'))
             out_gpx.seek(0)
-            with c_gpx:
-                st.download_button("⬇️ Download GPX", out_gpx, "Enriched.gpx", "application/gpx+xml", type="primary")
+            
+            col_gpx, col_csv = st.columns(2)
+            with col_gpx:
+                st.download_button("⬇️ Download GPX", out_gpx, out_filename, "application/gpx+xml", type="primary")
             
             # CSV
             csv_df = df[['km', 'cat', 'name', 'hours', 'phone', 'city', 'lat', 'lon', 'gmap']].copy()
             csv_df['km'] = csv_df['km'].round(1)
             csv_df.columns = ['KM', 'Type', 'Name', 'Hours', 'Phone', 'City', 'Lat', 'Lon', 'Map Link']
             out_csv = csv_df.to_csv(index=False).encode('utf-8')
-            with c_csv:
+            with col_csv:
                 st.download_button("⬇️ Download CSV", out_csv, "CueSheet.csv", "text/csv")
         
         else:
