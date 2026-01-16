@@ -7,7 +7,6 @@ import pydeck as pdk
 import concurrent.futures
 from math import radians, cos, sin, asin, sqrt
 from io import BytesIO
-import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered")
@@ -26,7 +25,7 @@ st.title("📍 GPS Enricher")
 st.markdown("Enrich your GPX track with detailed roadside amenities.")
 
 # --- 1. USER GUIDE ---
-with st.expander("📘 **User Guide & Logic**"):
+with st.expander("📘 **User Guide: Logic & Legend**"):
     st.markdown("""
     ### **1. Scanning Logic**
     * **Range:** The tool scans a **50m radius** along your track to ensure zero-detour stops.
@@ -39,7 +38,20 @@ with st.expander("📘 **User Guide & Logic**"):
     * **Logistics:** **Opening Hours** and **Phone Numbers**.
     * **Attributes:** Water drinkability, Toilet fees, etc.
 
-    ### **3. Support**
+    ### **3. Searchable Amenities**
+    * **💧 Water:** Drinking fountains, springs, taps, and **Cemeteries** (marked with Water icon).
+    * **🛒 Shops:** Supermarkets, convenience stores, bakeries.
+    * **⛽ Fuel:** 24/7 stations (often with food/water).
+    * **🍔 Food:** Restaurants, fast food, cafes.
+    * **🚽 Toilets:** Public restrooms.
+    * **🛏️ Sleep:** Hotels, hostels, guest houses.
+    * **⛺ Camping:** Official campsites.
+    * **💊 Pharmacy:** Medical supplies.
+    * **🔧 Bike Shop:** Repairs and parts.
+    * **🏧 ATM:** Cash machines.
+    * **🚆 Train:** Stations (for emergency bail-out).
+
+    ### **4. Support**
     For issues or feature requests: **jonas@verest.ch**
     """)
 
@@ -120,7 +132,7 @@ if uploaded_file:
 # --- ENGINE ---
 BATCH_SIZE = 25
 WORKERS = 4
-HEADERS = {"User-Agent": "GPX-Enricher/22.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/23.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -300,6 +312,7 @@ if st.session_state.running:
         # --- RESULTS ---
         st.subheader("📊 Results")
         
+        # Summary & Map
         df = pd.DataFrame(final_pois)
         if not df.empty:
             c1, c2 = st.columns([1, 2])
@@ -308,7 +321,7 @@ if st.session_state.running:
                 counts.columns = ['Category', 'Count']
                 st.dataframe(counts, hide_index=True)
             with c2:
-                # MAP
+                # RICH TOOLTIP MAP
                 map_data = []
                 for p in final_pois:
                     info_lines = [f"**{p['name']}** ({p['cat']})"]
