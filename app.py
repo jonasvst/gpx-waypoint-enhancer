@@ -5,82 +5,121 @@ import time
 import pandas as pd
 import pydeck as pdk
 import concurrent.futures
-import numpy as np
 from math import radians, cos, sin, asin, sqrt
 from io import BytesIO
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="GPS Enricher V16 (Analyst)", page_icon="📊", layout="centered")
+st.set_page_config(page_title="GPS Enricher", page_icon="📍", layout="centered")
 
 if 'running' not in st.session_state:
     st.session_state.running = False
 
 st.markdown("""
     <style>
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; font-weight: bold; }
-    div[data-testid="stExpander"] { display: none; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 3em; font-weight: bold; }
+    div[data-testid="stExpander"] { border: 1px solid #e6e6e6; border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 GPS Enricher: Analyst Edition")
-st.markdown("Scans route, calculates **Km markers**, provides **Summary Stats**, and exports **CSV Cue Sheets**.")
+st.title("📍 GPS Enricher")
+st.markdown("Turn any GPX track into a survival-ready route with water, food, and fuel stops.")
 
-# --- 1. UPLOAD ---
-uploaded_file = st.file_uploader("📂 Drop GPX file", type=['gpx'], disabled=st.session_state.running)
+# --- 1. USER GUIDE ---
+with st.expander("📘 **User Guide: How it works**"):
+    st.markdown("""
+    ### **The Logic**
+    This tool is designed for **ultra-cycling efficiency**. It does not dump thousands of POIs on your map.
+    
+    1.  **Strict Roadside Scan:** We only look **50 meters** sideways from your track. If a fountain is 200m away, we ignore it (unless you detour).
+    2.  **No Blind Spots:** We scan every **100 meters** along your route to ensure nothing is missed.
+    3.  **Smart De-Clutter:** If we find a Gas Station, we ignore other Gas Stations for the next **2km** (configurable). This keeps your GPS screen readable in towns.
+    
+    ### **Categories**
+    * **💧 Water:** Includes drinking fountains, springs, taps, and **Cemeteries** (often have taps).
+    * **🛒 Shops:** Supermarkets, convenience stores, and bakeries.
+    * **⛽ Fuel:** 24/7 stations (often with food/water).
+    """)
 
-# --- 2. SETTINGS ---
-st.subheader("⚙️ Settings")
-col1, col2 = st.columns(2)
-with col1:
-    MIN_GAP_KM = st.slider("Min Gap between same items (km)", 0.0, 10.0, 2.0, 0.5, disabled=st.session_state.running)
-with col2:
-    RADIUS = 50 # Fixed
-    st.info(f"📏 Scan Radius: {RADIUS}m (Roadside)")
+# --- 2. UPLOAD ---
+uploaded_file = st.file_uploader("📂 **Step 1:** Drop your GPX file here", type=['gpx'], disabled=st.session_state.running)
 
-# --- 3. CATEGORIES ---
-st.subheader("🛠️ Select Amenities")
+# --- 3. SETTINGS & FILTERS ---
+if uploaded_file:
+    st.subheader("⚙️ Configuration")
+    
+    # DENSITY CONTROL (The only technical setting left visible)
+    MIN_GAP_KM = st.slider(
+        "🧹 **Map Density (Min Gap)**", 
+        0.0, 10.0, 2.0, 0.5,
+        format="%.1f km",
+        help="Prevents clutter. Example: If set to 2.0km, we won't mark two Supermarkets within 2km of each other.",
+        disabled=st.session_state.running
+    )
 
-amenity_config = {
-    "Water": {
-        "label": "💧 Water (Taps/Fountains)",
-        "query": """(
-            node["amenity"~"drinking_water|fountain|watering_place"](around:{radius},{coords});
-            node["natural"~"spring"](around:{radius},{coords});
-            node["man_made"~"water_tap|water_well"](around:{radius},{coords});
-        )""",
-        "icon": "Water", "color": [0, 128, 255]
-    },
-    "Cemetery": {
-        "label": "⚰️ Cemeteries (Water Sources)",
-        "query": """node["amenity"~"grave_yard"](around:{radius},{coords})""",
-        "icon": "Water", "color": [0, 100, 255] # Mapped to Water Icon for GPS
-    },
-    "Toilets": {"label": "🚽 Toilets", "query": """node["amenity"~"toilets"](around:{radius},{coords})""", "icon": "Restroom", "color": [150, 150, 150]},
-    "Shops": {"label": "🛒 Supermarkets", "query": """node["shop"~"supermarket|convenience|kiosk|bakery|general"](around:{radius},{coords})""", "icon": "Convenience Store", "color": [0, 200, 0]},
-    "Fuel": {"label": "⛽ Fuel Stations", "query": """node["amenity"~"fuel"](around:{radius},{coords})""", "icon": "Gas Station", "color": [255, 140, 0]},
-    "Food": {"label": "🍔 Restaurants", "query": """node["amenity"~"restaurant|fast_food|cafe"](around:{radius},{coords})""", "icon": "Food", "color": [0, 200, 0]},
-    "Sleep": {"label": "🛏️ Hotels", "query": """node["tourism"~"hotel|hostel|guest_house"](around:{radius},{coords})""", "icon": "Lodging", "color": [128, 0, 128]},
-    "Camping": {"label": "⛺ Campsites", "query": """node["tourism"~"camp_site"](around:{radius},{coords})""", "icon": "Campground", "color": [34, 139, 34]},
-    "Bike": {"label": "🔧 Bike Shops", "query": """node["shop"~"bicycle"](around:{radius},{coords})""", "icon": "Bike Shop", "color": [255, 0, 0]},
-    "Pharm": {"label": "💊 Pharmacies", "query": """node["amenity"~"pharmacy"](around:{radius},{coords})""", "icon": "First Aid", "color": [255, 0, 0]},
-    "ATM": {"label": "🏧 ATMs", "query": """node["amenity"~"atm"](around:{radius},{coords})""", "icon": "Generic", "color": [0, 100, 0]},
-    "Train": {"label": "🚆 Train Stations", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
-}
+    st.caption("Select amenities to scan for:")
 
-cols = st.columns(3)
-selected_keys = []
-defaults = ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]
+    # HIDDEN CONSTANTS
+    RADIUS = 50        
+    SAMPLE_STEP = 100  
 
-for i, (key, cfg) in enumerate(amenity_config.items()):
-    with cols[i % 3]:
-        if st.checkbox(cfg["label"], value=(key in defaults), disabled=st.session_state.running):
-            selected_keys.append(key)
+    amenity_config = {
+        "Water": {
+            "label": "💧 Water & Taps",
+            "query": """(
+                node["amenity"~"drinking_water|fountain|watering_place"](around:{radius},{coords});
+                node["natural"~"spring"](around:{radius},{coords});
+                node["man_made"~"water_tap|water_well"](around:{radius},{coords});
+            )""",
+            "icon": "Water", "color": [0, 128, 255]
+        },
+        "Cemetery": {
+            "label": "⚰️ Cemeteries",
+            "query": """node["amenity"~"grave_yard"](around:{radius},{coords})""",
+            "icon": "Water", "color": [0, 100, 255]
+        },
+        "Toilets": {"label": "🚽 Toilets", "query": """node["amenity"~"toilets"](around:{radius},{coords})""", "icon": "Restroom", "color": [150, 150, 150]},
+        "Shops": {"label": "🛒 Supermarkets", "query": """node["shop"~"supermarket|convenience|kiosk|bakery|general"](around:{radius},{coords})""", "icon": "Convenience Store", "color": [0, 200, 0]},
+        "Fuel": {"label": "⛽ Fuel Stations", "query": """node["amenity"~"fuel"](around:{radius},{coords})""", "icon": "Gas Station", "color": [255, 140, 0]},
+        "Food": {"label": "🍔 Restaurants", "query": """node["amenity"~"restaurant|fast_food|cafe"](around:{radius},{coords})""", "icon": "Food", "color": [0, 200, 0]},
+        "Sleep": {"label": "🛏️ Hotels", "query": """node["tourism"~"hotel|hostel|guest_house"](around:{radius},{coords})""", "icon": "Lodging", "color": [128, 0, 128]},
+        "Camping": {"label": "⛺ Campsites", "query": """node["tourism"~"camp_site"](around:{radius},{coords})""", "icon": "Campground", "color": [34, 139, 34]},
+        "Bike": {"label": "🔧 Bike Shops", "query": """node["shop"~"bicycle"](around:{radius},{coords})""", "icon": "Bike Shop", "color": [255, 0, 0]},
+        "Pharm": {"label": "💊 Pharmacies", "query": """node["amenity"~"pharmacy"](around:{radius},{coords})""", "icon": "First Aid", "color": [255, 0, 0]},
+        "ATM": {"label": "🏧 ATMs", "query": """node["amenity"~"atm"](around:{radius},{coords})""", "icon": "Generic", "color": [0, 100, 0]},
+        "Train": {"label": "🚆 Train Stations", "query": """node["railway"~"station|halt"](around:{radius},{coords})""", "icon": "Generic", "color": [50, 50, 50]}
+    }
+
+    cols = st.columns(3)
+    selected_keys = []
+    defaults = ["Water", "Cemetery", "Toilets", "Shops", "Fuel"]
+
+    for i, (key, cfg) in enumerate(amenity_config.items()):
+        with cols[i % 3]:
+            if st.checkbox(cfg["label"], value=(key in defaults), disabled=st.session_state.running):
+                selected_keys.append(key)
+
+    # --- ACTION BUTTONS ---
+    st.markdown("---")
+    col_start, col_stop = st.columns([3, 1])
+    
+    with col_start:
+        if not st.session_state.running:
+            if st.button("🚀 Start Scan", type="primary"):
+                if not selected_keys: st.error("Please select at least one amenity.")
+                else:
+                    st.session_state.running = True
+                    st.rerun()
+
+    with col_stop:
+        if st.session_state.running:
+            if st.button("🛑 Cancel"):
+                st.session_state.running = False
+                st.rerun()
 
 # --- ENGINE ---
 BATCH_SIZE = 25
-SAMPLE_STEP = 100
 WORKERS = 4
-HEADERS = {"User-Agent": "GPX-Analyst/16.0", "Referer": "https://streamlit.io/"}
+HEADERS = {"User-Agent": "GPX-Enricher/17.0", "Referer": "https://streamlit.io/"}
 MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://api.openstreetmap.fr/oapi/interpreter",
@@ -96,7 +135,6 @@ def haversine(lon1, lat1, lon2, lat2):
     return 6371000 * c
 
 def calculate_track_distance(points):
-    """Adds cumulative distance to track points"""
     total_dist = 0
     points_with_dist = []
     last = None
@@ -104,31 +142,20 @@ def calculate_track_distance(points):
         if last:
             dist = haversine(last.longitude, last.latitude, p.longitude, p.latitude)
             total_dist += dist
-        points_with_dist.append({
-            "obj": p,
-            "lat": p.latitude,
-            "lon": p.longitude,
-            "cum_dist": total_dist
-        })
+        points_with_dist.append({"lat": p.latitude, "lon": p.longitude, "cum_dist": total_dist})
         last = p
     return points_with_dist
 
 def get_nearest_km(poi_lat, poi_lon, track_data):
-    """Finds the Km marker of the POI on the track (Simplified nearest neighbor)"""
-    # This acts as a 'snap to track' to find where along the route this item is
-    # Using a simple scan (could be optimized with KDTree but track_data is usually small enough for simple loop)
     min_dist = float('inf')
     km_mark = 0
-    
-    # Optimization: Only check points roughly nearby? 
-    # For now, we scan a subset to be fast (every 5th point)
-    for tp in track_data[::5]:
+    # Optimization: Scan strided track points
+    for tp in track_data[::10]:
         d = (tp['lat'] - poi_lat)**2 + (tp['lon'] - poi_lon)**2
         if d < min_dist:
             min_dist = d
             km_mark = tp['cum_dist']
-            
-    return km_mark / 1000.0 # Return in KM
+    return km_mark / 1000.0
 
 def fetch_batch(args):
     points, active_keys = args
@@ -148,36 +175,19 @@ def fetch_batch(args):
         except: continue
     return []
 
-# --- UI CONTROL ---
-col_start, col_stop = st.columns([3, 1])
-with col_start:
-    if uploaded_file and not st.session_state.running:
-        if st.button("🚀 Start Scan", type="primary"):
-            if not selected_keys: st.error("Select amenities.")
-            else:
-                st.session_state.running = True
-                st.rerun()
-
-with col_stop:
-    if st.session_state.running:
-        if st.button("🛑 Cancel"):
-            st.session_state.running = False
-            st.rerun()
-
 if st.session_state.running:
-    status = st.status("Reading Track...", expanded=True)
+    status = st.status("Initializing Scan...", expanded=True)
     try:
         gpx = gpxpy.parse(uploaded_file)
         
-        # 1. Flatten & Calc Distance
+        # 1. Flatten & Distance
         raw_pts = []
         for t in gpx.tracks:
             for s in t.segments:
                 raw_pts.extend(s.points)
+        track_data = calculate_track_distance(raw_pts)
         
-        track_data = calculate_track_distance(raw_pts) # List of dicts with cum_dist
-        
-        # 2. Resample for Scanning
+        # 2. Resample
         scan_pts = []
         last = None
         for p in raw_pts:
@@ -195,7 +205,6 @@ if st.session_state.running:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as exc:
             futures = {exc.submit(fetch_batch, (b, selected_keys)): i for i, b in enumerate(batches)}
-            
             for i, f in enumerate(concurrent.futures.as_completed(futures)):
                 completed = i + 1
                 percent = completed / total_batches
@@ -213,22 +222,19 @@ if st.session_state.running:
                         seen_ids.add(item['id'])
                         found_raw.append(item)
         
-        # 3. Post-Processing (Thinning + Km Calc)
-        status.write("Calculating distances & cleaning...")
+        # 3. Post-Processing
+        status.write("Cleaning & Calculating KM markers...")
         final_pois = []
         accepted_locs = {k: [] for k in selected_keys}
         min_deg = MIN_GAP_KM / 111.0
         
         def get_cat(item):
             tags = item.get('tags', {})
-            # Specific Checks
             if "Cemetery" in selected_keys and tags.get("amenity") == "grave_yard": return "Cemetery"
-            
             if "Water" in selected_keys:
                 if tags.get("amenity") in ["drinking_water", "fountain", "watering_place"]: return "Water"
                 if tags.get("natural") == "spring": return "Water"
                 if tags.get("man_made") in ["water_tap", "water_well"]: return "Water"
-                
             for k in selected_keys:
                 if k in ["Water", "Cemetery"]: continue
                 q = amenity_config[k]["query"]
@@ -249,7 +255,7 @@ if st.session_state.running:
             
             lat, lon = item['lat'], item['lon']
             
-            # Gap Check
+            # De-clutter check
             too_close = False
             for (alat, alon) in accepted_locs[cat]:
                 if sqrt((alat-lat)**2 + (alon-lon)**2) < min_deg:
@@ -261,7 +267,6 @@ if st.session_state.running:
                 name = tags.get('name', cat)
                 if cat == "Cemetery": name = "Cemetery (Check Tap)"
                 
-                # Calculate KM Marker
                 km_mark = get_nearest_km(lat, lon, track_data)
                 
                 final_pois.append({
@@ -270,24 +275,21 @@ if st.session_state.running:
                     "km": km_mark,
                     "desc": f"{cat}: {tags.get('amenity', '')} (@ {km_mark:.1f}km)",
                     "symbol": amenity_config[cat]["icon"],
-                    "gmap": f"https://maps.google.com/?q={lat},{lon}"
+                    "gmap": f"http://googleusercontent.com/maps.google.com/?q={lat},{lon}"
                 })
                 accepted_locs[cat].append((lat, lon))
         
-        # Sort by KM for CSV
         final_pois.sort(key=lambda x: x['km'])
+        status.update(label="Complete!", state="complete", expanded=False)
         
-        status.update(label=f"Done!", state="complete")
+        # --- RESULTS ---
+        st.subheader("📊 Results")
         
-        # --- RESULTS UI ---
-        
-        # 1. Summary
-        st.subheader("📊 Summary")
+        # Summary Table
         df = pd.DataFrame(final_pois)
         if not df.empty:
             counts = df['cat'].value_counts().reset_index()
             counts.columns = ['Category', 'Count']
-            
             c1, c2 = st.columns([1, 2])
             with c1:
                 st.dataframe(counts, hide_index=True)
@@ -302,37 +304,39 @@ if st.session_state.running:
                         pdk.Layer("ScatterplotLayer", map_data, get_position="coordinates", get_fill_color="color", get_radius=200, pickable=True)
                     ], tooltip={"text": "{name}"}
                 ))
-        
-        # 2. Downloads
-        st.subheader("💾 Download")
-        col_gpx, col_csv = st.columns(2)
-        
-        # GPX
-        for p in final_pois:
-            wpt = gpxpy.gpx.GPXWaypoint(latitude=p['lat'], longitude=p['lon'], name=p['name'])
-            wpt.description = p['desc']
-            wpt.symbol = p['symbol']
-            wpt.type = p['cat']
-            gpx.waypoints.append(wpt)
             
-        out_gpx = BytesIO()
-        out_gpx.write(gpx.to_xml().encode('utf-8'))
-        out_gpx.seek(0)
-        
-        with col_gpx:
-            st.download_button("⬇️ Download GPX (Device)", out_gpx, "TCR_Full.gpx", "application/gpx+xml", type="primary")
+            st.success(f"Added {len(final_pois)} waypoints to your route.")
             
-        # CSV
-        if not df.empty:
-            # Prepare clean CSV
+            # Downloads
+            col_gpx, col_csv = st.columns(2)
+            
+            # GPX Build
+            for p in final_pois:
+                wpt = gpxpy.gpx.GPXWaypoint(latitude=p['lat'], longitude=p['lon'], name=p['name'])
+                wpt.description = p['desc']
+                wpt.symbol = p['symbol']
+                wpt.type = p['cat']
+                gpx.waypoints.append(wpt)
+            
+            out_gpx = BytesIO()
+            out_gpx.write(gpx.to_xml().encode('utf-8'))
+            out_gpx.seek(0)
+            
+            with col_gpx:
+                st.download_button("⬇️ Download GPX (Device)", out_gpx, "Enriched_Route.gpx", "application/gpx+xml", type="primary")
+                
+            # CSV Build
             csv_df = df[['km', 'cat', 'name', 'lat', 'lon', 'gmap']].copy()
             csv_df['km'] = csv_df['km'].round(1)
             csv_df.columns = ['KM', 'Category', 'Name', 'Latitude', 'Longitude', 'Google Maps Link']
-            
             out_csv = csv_df.to_csv(index=False).encode('utf-8')
+            
             with col_csv:
-                st.download_button("⬇️ Download CSV (Cue Sheet)", out_csv, "TCR_CueSheet.csv", "text/csv")
+                st.download_button("⬇️ Download CSV (Cue Sheet)", out_csv, "Route_CueSheet.csv", "text/csv")
         
+        else:
+            st.warning("No amenities found nearby. Try increasing the Density Slider or checking more categories.")
+
         if st.button("🔄 Start New File"):
             st.session_state.running = False
             st.rerun()
